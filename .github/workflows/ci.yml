@@ -1,0 +1,56 @@
+name: CI
+
+# docs/06_PARITY_TESTS.md section 5: on every push, run unit tests plus parity
+# against the committed fixture. Parity failure = red build. Do not merge around it.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_FROZEN: "0"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --all-groups
+
+      - name: ruff (lint)
+        run: uv run ruff check .
+
+      - name: ruff (format)
+        run: uv run ruff format --check .
+
+      # --strict on the parity- and statistics-critical surface only
+      # (CLAUDE.md working style, docs/10_ROADMAP.md M1).
+      - name: mypy --strict on core/ and validate/
+        run: uv run mypy --strict azimuth/core azimuth/validate
+
+      - name: mypy (non-strict, rest of package)
+        run: uv run mypy azimuth
+
+      - name: pytest
+        run: uv run pytest -v
+
+      # CLAUDE.md rule 4: N_trials.txt accumulates across the project's lifetime
+      # and is never reset. A commit that decreases it is a bug, not a cleanup.
+      - name: N_trials.txt is monotonic
+        run: uv run python scripts/check_n_trials.py

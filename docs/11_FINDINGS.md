@@ -38,12 +38,22 @@ deciding them after results are visible is itself a researcher degree of freedom
 | 14 | Statistical power not pre-registered | `05` §6, `09` | M4 | UNADJUDICATED |
 | 15 | Holdout single-touch is a promise, not a mechanism | `05` §0 | M3 | UNADJUDICATED |
 | 16 | Component collinearity predicts the ablation | `02` §5 | M1 | UNADJUDICATED |
+| 17 | `default.yaml` path discrepancy | `00` vs `04` §3 | M1 | UNADJUDICATED |
 
 Fixed in code already (not awaiting adjudication):
 
 | # | Area | Status |
 |---|---|---|
 | 0 | `crowding` operator precedence, `pine/AZIMUTH.pine:177` | **FIXED** — commit 1 |
+| 0b | `ruff format` silently edits Python snippets inside `docs/*.md` | **FIXED** — commit 2 |
+
+**0b** deserves a note despite being a one-line config fix. `ruff format .` reformatted
+a code fence inside `04_SPEC_PYTHON_CLI.md` §6 on its first run. Had it reached
+`09_PREREGISTRATION.md`, it would have changed that file's bytes and therefore its
+SHA-256 — invalidating a live registration through nothing but a whitespace tweak, and
+the gate would have reported the registration as edited-after-the-fact. `docs/` and
+`pine/` are now in `extend-exclude` in `pyproject.toml`. Formatters must never be
+pointed at the specification.
 
 ---
 
@@ -524,6 +534,30 @@ If ρ(ribbon, bb) and ρ(ribbon, rsi) exceed ~0.6, the likely ablation outcome �
 **in the pre-registration as a prediction**, rather than discovered afterwards. A
 pre-registered prediction that comes true is far stronger evidence than the same
 observation made post hoc, and it costs nothing to make now.
+
+---
+
+## 17. `default.yaml` lives in two places in the docs
+
+**Where:** `00_README.md` repo layout vs `04_SPEC_PYTHON_CLI.md` §3. **Decide by M1.**
+
+The two layout sketches disagree:
+
+- `00` puts `config/default.yaml` at the repo root, and every command example in
+  `04` §4 passes `--config config/default.yaml`;
+- `04` §3 puts it inside the package at `azimuth/config/default.yaml`, alongside
+  `schema.py`.
+
+**Handling in code:** `azimuth/config/default.yaml` is treated as canonical, per
+`04` §3 — it is the section the build task cites, and it is the only location that
+survives `pip install`, so `load_default()` works from an installed package rather
+than only from a source checkout. A repo-root `config/` directory is retained for
+run inputs that genuinely are not package data (`grid.yaml`, per `04` §4's
+`azimuth sweep --grid config/grid.yaml`), with a README pointing at the canonical
+file. `--config <path>` accepts any path, so the `04` §4 examples still work.
+
+**Proposed amendment:** correct the `00` layout sketch to match `04` §3. Trivial,
+but worth doing before someone creates a second `default.yaml` and the two drift.
 
 ---
 
