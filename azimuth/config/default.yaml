@@ -1,0 +1,83 @@
+# AZIMUTH default configuration
+#
+# Key names are canonical and come from docs/07_PARAMETERS.md section 1.
+# docs/03_SPEC_PINE.md section 3 fixes the naming contract: these keys map 1:1 to
+# the Pine input variables (camelCase in Pine, snake_case here). Do not rename one
+# side without the other -- the sweep addresses Pine inputs by these names.
+#
+# Values here are DEFAULTS, not chosen parameters. Sweep ranges live in docs/07
+# section 1; the staged sweep procedure that keeps N tractable is section 2.
+
+ribbon:
+  lengths: [8, 13, 21, 34, 55, 89, 144, 233]   # Fibonacci: convention, not magic
+  slope_lookback: 5
+  compress_lookback: 200                        # FINDING-4: cannot affect any metric
+  compress_pctile: 20.0                         # FINDING-4
+
+bollinger:
+  length: 20
+  mult: 2.0
+  bw_lookback: 200                              # FINDING-4
+  squeeze_pctile: 20.0                          # FINDING-4
+
+rsi:
+  length: 14
+  span: 25.0                                    # RSI distance from 50 mapping to +/-1
+  div_legs: 5                                   # confirms 5 bars late -- lag, not repaint
+  div_bonus: 0.35                               # sweep includes 0.0 to test it earns its place
+
+htf:
+  tf1: "240"
+  tf2: "1D"
+  use_tf2: true
+  ema_length: 50
+  rsi_length: 14                                # FINDING-20: hardcoded in Pine htfCalc
+  slope_lookback: 3                             # FINDING-20: the `he[3]` in Pine htfCalc
+  confirmed_only: true                          # NEVER sweep. false = lookahead. Enforced.
+  weight_tf1: 0.6                               # clip(0.6*HTF1 + 0.4*HTF2)
+
+corr:
+  length: 60                                    # on log returns, never prices
+  min_abs_rho: 0.30
+  ref_ema: 50
+  # PLACEHOLDERS (docs/01 section 5, docs/07 section 5). Choose by causal story,
+  # verify stability, drop any reference whose rho sign flips between sample halves.
+  # FINDING-3: a reference on a different trading calendar injects structural zero
+  # returns; parity will reproduce the resulting rho exactly and it will still be
+  # meaningless.
+  references:
+    - symbol: "TVC:DXY"
+      enabled: true
+    - symbol: "SP:SPX"
+      enabled: true
+    - symbol: "TVC:GOLD"
+      enabled: false
+
+regime:
+  er_length: 20
+  er_threshold: 0.30
+  adx_length: 14
+  adx_threshold: 20.0
+  mode: adaptive                                # adaptive | trend_only | range_only
+                                                # three separate hypotheses, not a sweep axis
+
+weights:
+  # Mandatory baseline in every walk-forward: all five at 1.0 (docs/02 section 1).
+  # If tuned weights do not beat equal weights out of sample, use equal weights.
+  ribbon: 1.0
+  bollinger: 0.8
+  rsi: 0.8
+  htf: 1.2
+  corr: 0.5
+
+signal:
+  enter: 45.0
+  exit: 15.0                                    # must be < enter; enforced
+  cooldown_bars: 8                              # FINDING-2: measured from last ENTRY
+  require_trend: true                           # FINDING-13: not tabulated in docs/07
+  require_htf: true                             # FINDING-13
+
+risk:
+  atr_stop_mult: 2.0
+  rr_target: 2.0
+  atr_length: 14                                # FINDING-13: missing from docs/07 section 1

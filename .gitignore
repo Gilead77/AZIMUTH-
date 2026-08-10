@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+
+# Data + run artefacts
+*.parquet
+cache/
+exports/
+reports/
+
+# Run directories are generated, but the cumulative trial counter and the
+# holdout ledger are PERMANENT PROJECT STATE and must be committed.
+# CLAUDE.md rule 4: N_trials.txt accumulates across the project's lifetime and
+# is never reset. See docs/11_FINDINGS.md finding 6 (N under-counted) and
+# finding 15 (holdout single-touch).
+runs/*
+!runs/N_trials.txt
+!runs/holdout_touches.log
+
+# OS
+.DS_Store
