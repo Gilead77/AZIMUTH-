@@ -18,6 +18,7 @@ import logging
 from pathlib import Path
 from typing import Annotated, NoReturn
 
+import pandas as pd
 import typer
 from rich.console import Console
 
@@ -99,10 +100,63 @@ def signals(
     tf: Annotated[str, typer.Option("--tf")],
     last: Annotated[int, typer.Option("--last", help="Show the most recent N bars.")] = 20,
     json_out: Annotated[bool, typer.Option("--json", help="Emit JSON instead of a table.")] = False,
+    source: Annotated[str, typer.Option("--source", help="yfinance | ccxt | csv")] = "yfinance",
+    csv: Annotated[Path | None, typer.Option("--csv", help="Local CSV when --source csv.")] = None,
+    start: Annotated[str, typer.Option("--start")] = "2018-01-01",
     config: ConfigOpt = None,
 ) -> None:
-    """Compute the composite score and state machine offline. [M1]"""
-    _not_implemented("signals", "M1", "azimuth/core/score.py, azimuth/core/signals.py")
+    """Compute the composite score and state machine offline. [M1]
+
+    Signal values only. NO performance metric is produced here and none may be
+    until parity passes (CLAUDE.md rule 2).
+    """
+    import json as json_lib
+
+    from rich.table import Table
+
+    from azimuth.config.schema import load_config
+    from azimuth.core.pipeline import compute_frame
+    from azimuth.data import loaders
+
+    settings = load_config(config)
+
+    if source == "csv":
+        if csv is None:
+            err_console.print("[bold red]--csv is required with --source csv[/]")
+            raise typer.Exit(code=2)
+        df = loaders.load_csv(csv, symbol, tf)
+    elif source == "ccxt":
+        df = loaders.load_ccxt(symbol, tf, start)
+    else:
+        df = loaders.load_yfinance(symbol, tf, start)
+
+    frame = compute_frame(df, settings)
+    columns = ["x_ribbon", "x_bb", "x_rsi", "x_htf", "x_corr", "score", "x_state"]
+    tail = frame[columns].tail(last)
+
+    if json_out:
+        payload = tail.reset_index().to_dict(orient="records")
+        console.print_json(json_lib.dumps(payload, default=str))
+        return
+
+    table = Table(title=f"{symbol} {tf} — last {last} bars", title_style="bold")
+    table.add_column("time")
+    for column in columns:
+        table.add_column(column, justify="right")
+
+    for timestamp, row in tail.iterrows():
+        table.add_row(
+            str(timestamp),
+            *(
+                "—" if pd.isna(row[c]) else (f"{row[c]:.0f}" if c == "x_state" else f"{row[c]:.3f}")
+                for c in columns
+            ),
+        )
+    console.print(table)
+    console.print(
+        "[dim]Signal values only. No performance metric exists until `azimuth parity` "
+        "passes at 1e-6 (CLAUDE.md rule 2).[/]"
+    )
 
 
 # ── parity: the gate on every performance number ────────────────────────────────
@@ -111,15 +165,65 @@ def signals(
 @app.command()
 def parity(
     pine: Annotated[Path, typer.Option("--pine", help="Pine 'Export chart data' CSV.")],
-    tol: Annotated[float, typer.Option("--tol", help="Absolute tolerance.")] = 1e-6,
+    tol: Annotated[
+        float | None,
+        typer.Option("--tol", help="Override every per-series tolerance with one value."),
+    ] = None,
     config: ConfigOpt = None,
 ) -> None:
     """Assert Python matches the Pine fixture (docs/06_PARITY_TESTS.md). [M1]
 
-    This is the gate. Until it passes, any backtest describes a system that is not
-    the one on the chart, and its metrics are not about AZIMUTH.
+    THE GATE. Until it passes, any backtest describes a system that is not the one
+    on the chart, and its metrics are not about AZIMUTH (CLAUDE.md rule 2).
+
+    Exits non-zero on any mismatch. With no ``--tol`` the per-series tolerances in
+    docs/06 section 2 apply, which is how the gate should normally run; passing
+    ``--tol`` loosens every series at once and is for diagnosis only.
     """
-    _not_implemented("parity", "M1", "azimuth/validate/parity.py")
+    from rich.table import Table
+
+    from azimuth.config.schema import load_config
+    from azimuth.validate.parity import run_parity
+
+    report = run_parity(pine, load_config(config), tol=tol)
+
+    table = Table(title=f"parity — {pine.name}", title_style="bold")
+    table.add_column("series")
+    table.add_column("max |delta|", justify="right")
+    table.add_column("tolerance", justify="right")
+    table.add_column("bars", justify="right")
+    table.add_column("verdict")
+
+    for result in report.results:
+        table.add_row(
+            result.series,
+            "—" if result.series == "signal_bars" else f"{result.max_abs_diff:.3e}",
+            "exact" if result.tolerance == 0.0 else f"{result.tolerance:.0e}",
+            str(result.n_compared),
+            "[green]PASS[/]" if result.passed else f"[bold red]FAIL[/] {result.detail}",
+        )
+
+    console.print(table)
+    console.print(
+        f"{report.n_compared} bars compared after a {report.n_bars - report.n_compared}-bar burn-in"
+    )
+
+    if report.missing:
+        err_console.print(
+            f"[yellow]not compared[/] (absent from the export): {', '.join(report.missing)}"
+        )
+
+    if not report.passed:
+        failed = [r.series for r in report.results if not r.passed]
+        err_console.print(f"\n[bold red]PARITY FAILED[/] — {', '.join(failed)}")
+        err_console.print(
+            "No performance metric may be computed until this passes (CLAUDE.md rule 2). "
+            "docs/06 section 3 lists the usual causes; for x_ribbon suspect ATR/RMA "
+            "seeding before the EMA."
+        )
+        raise typer.Exit(code=1)
+
+    console.print("\n[bold green]PARITY PASSED[/] — Python matches the chart.")
 
 
 # ── backtest ────────────────────────────────────────────────────────────────────

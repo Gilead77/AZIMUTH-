@@ -40,21 +40,36 @@ def test_command_help_works(command: str):
     assert result.exit_code == 0
 
 
-@pytest.mark.parametrize(
-    ("command", "args"),
-    [
-        ("fetch", ["--symbol", "BTC-USD", "--tf", "4h"]),
-        ("signals", ["--symbol", "BTC-USD", "--tf", "4h"]),
-        ("backtest", ["--symbol", "BTC-USD", "--tf", "4h"]),
-        ("parity", ["--pine", "exports/x.csv"]),
-        ("ablate", ["--symbol", "BTC-USD", "--tf", "4h"]),
-        ("report", ["--run", "runs/x", "--out", "reports/x.html"]),
-        ("watch", ["--symbols", "BTC-USD", "--tf", "4h"]),
-    ],
-)
+STUBS = [
+    ("fetch", ["--symbol", "BTC-USD", "--tf", "4h"]),
+    ("backtest", ["--symbol", "BTC-USD", "--tf", "4h"]),
+    ("ablate", ["--symbol", "BTC-USD", "--tf", "4h"]),
+    ("report", ["--run", "runs/x", "--out", "reports/x.html"]),
+    ("watch", ["--symbols", "BTC-USD", "--tf", "4h"]),
+]
+"""Commands still awaiting their milestone. `signals` and `parity` landed in M1
+and are covered by tests/test_parity_harness.py."""
+
+
+@pytest.mark.parametrize(("command", "args"), STUBS)
 def test_stub_exits_non_zero(command: str, args: list[str]):
     result = runner.invoke(app, [command, *args])
     assert result.exit_code != 0, f"`azimuth {command}` stub must not exit 0"
+    assert "not implemented" in result.stderr
+
+
+def test_parity_is_no_longer_a_stub():
+    """It is the M1 gate, and it must fail on a missing fixture rather than
+    reporting 'not implemented'."""
+    result = runner.invoke(app, ["parity", "--pine", "does-not-exist.csv"])
+    assert result.exit_code != 0
+    assert "not implemented" not in result.stderr
+
+
+def test_signals_requires_a_csv_path_when_source_is_csv():
+    result = runner.invoke(app, ["signals", "--symbol", "X", "--tf", "60", "--source", "csv"])
+    assert result.exit_code == 2
+    assert "--csv is required" in result.stderr
 
 
 def test_validate_refuses_without_preregistration(tmp_path):
