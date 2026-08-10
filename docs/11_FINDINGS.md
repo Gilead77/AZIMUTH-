@@ -42,6 +42,7 @@ deciding them after results are visible is itself a researcher degree of freedom
 | 18 | `ta.pivothigh` tie-handling unspecified | `06` §3 | M1 | UNADJUDICATED |
 | 19 | Fixture export cannot verify `x_corr` | `06` §1–2 | M1 | **RESOLVED** — commit 4 |
 | 20 | `htfCalc` hardcodes 14 and 3 | `03` §3, `07` §1 | M2 | UNADJUDICATED |
+| 21 | **HTF resample `closed="right"` is wrong** | `04` §6 | M1 | UNADJUDICATED ⚠️ |
 
 Fixed in code already (not awaiting adjudication):
 
@@ -661,6 +662,61 @@ Recommendation on sweeping: **tie `htf.rsi_length` to `rsi.length`** rather than
 sweeping it independently — they measure the same thing at two sampling rates, and
 varying them separately adds a dimension without adding a distinct hypothesis. Leave
 `htf.slope_lookback` fixed at 3.
+
+---
+
+## 21. The HTF resample snippet takes the wrong window ⚠️
+
+**Where:** `04_SPEC_PYTHON_CLI.md` §6. **Decide by M1. Code already deviates from the
+spec — flagging loudly because this one changes numbers.**
+
+`04` §6 gives the HTF construction as:
+
+```python
+htf = df.resample(rule, label="right", closed="right").agg(OHLCV_AGG)
+```
+
+`closed="right"` is wrong for this data, and it shifts every HTF bar's contents by one
+base bar.
+
+Canonical-frame timestamps are bar **open** times — that is what TradingView's chart
+export, yfinance and ccxt all return, and `04` §5 does not say otherwise.
+`closed="right"` therefore builds the half-open interval `(00:00, 04:00]`, so the 4H
+bar aggregates the 1H bars at 01:00, 02:00, 03:00 and 04:00. TradingView's 4H bar
+covers 00:00, 01:00, 02:00, 03:00.
+
+Measured on a 1H series with closes 1.0 … 8.0:
+
+| Setting | Bars aggregated | `open` | `close` |
+|---|---|---|---|
+| spec — `closed="right"` | 01:00–04:00 | 2.0 | 5.0 |
+| **correct — `closed="left"`** | **00:00–03:00** | **1.0** | **4.0** |
+| TradingView | 00:00–03:00 | 1.0 | 4.0 |
+
+Every OHLC field comes from the wrong window: the bar that opens the HTF period is
+dropped, and one belonging to the *next* period is swallowed. Downstream that
+corrupts `he = EMA(close, 50)`, `hr = RSI(close, 14)` and the `he > he[3]` slope
+term — i.e. all three votes in `01` §4 — for the **highest-weighted component** at 1.2.
+
+It is easiest to see at the daily boundary, where `closed="right"` puts a day's 00:00
+bar into the *previous* day's daily bar.
+
+**Why it deserves emphasis beyond being a one-word fix.** The failure presents as an
+`x_htf` parity mismatch of roughly one bar, and the intuitive response to a one-bar
+mismatch is to adjust the `.shift(1)`. That trades a grouping error for a **lookahead**
+error, makes parity pass, and makes the backtest better — which is precisely the
+sequence `CLAUDE.md` rule 1 and `04` §6's own warning exist to prevent. The grouping
+and the shift are independent; only the shift is about lookahead.
+
+**Handling in code:** `azimuth/data/resample.py` uses `closed="left", label="right"`,
+with the deviation documented at the top of the module and at the call.
+`tests/test_data_layer.py::test_spec_closed_right_takes_the_wrong_window` pins the
+difference so the spec's snippet cannot be pasted back in, and
+`test_daily_bar_covers_one_calendar_day` covers the daily case.
+
+**Proposed amendment:** correct the snippet in `04` §6 to `closed="left"`, and add a
+sentence stating that canonical-frame timestamps are bar-open times — the whole
+question turns on that, and the spec never says it.
 
 ---
 
