@@ -39,6 +39,7 @@ deciding them after results are visible is itself a researcher degree of freedom
 | 15 | Holdout single-touch is a promise, not a mechanism | `05` §0 | M3 | UNADJUDICATED |
 | 16 | Component collinearity predicts the ablation | `02` §5 | M1 | UNADJUDICATED |
 | 17 | `default.yaml` path discrepancy | `00` vs `04` §3 | M1 | UNADJUDICATED |
+| 18 | `ta.pivothigh` tie-handling unspecified | `06` §3 | M1 | UNADJUDICATED |
 
 Fixed in code already (not awaiting adjudication):
 
@@ -558,6 +559,34 @@ file. `--config <path>` accepts any path, so the `04` §4 examples still work.
 
 **Proposed amendment:** correct the `00` layout sketch to match `04` §3. Trivial,
 but worth doing before someone creates a second `default.yaml` and the two drift.
+
+---
+
+## 18. `ta.pivothigh` / `ta.pivotlow` tie-handling is unspecified
+
+**Where:** `06_PARITY_TESTS.md` §3. **Decide by M1 — the fixture settles it.**
+
+`06` §3 specifies the confirmation lag for the pivot functions but not the
+comparison used against the flanking bars. On an exactly-flat top — say
+`[…, 9, 9, 9, …]` — whether a bar counts as a pivot depends on whether the
+comparison is strict (`>`) or inclusive (`>=`), and whether the two sides use the
+same one. TradingView's documentation does not pin this down either.
+
+It only matters on exact ties, which are rare in continuous price data but not rare
+in the series AZIMUTH actually feeds these functions: `pine/AZIMUTH.pine:140-141`
+takes pivots of **RSI**, which is bounded, quantised by its own smoothing, and
+genuinely does repeat values on quiet bars. The divergence bonus is `±0.35` — about
+6.5 score points at the default RSI weight — so a spurious or missed pivot is not
+negligible.
+
+**Handling in code:** behind `PIVOT_STRICT_BOTH` in `azimuth/core/primitives.py`,
+defaulting to strict on both flanks. Same pattern as finding 12: one constant, one
+line to flip, with `tests/test_pivot_lag.py` pinning current behaviour.
+
+**Resolution path:** the fixture decides. The confirmation *lag* is not in question
+and is not configurable — it is asserted independently in
+`tests/test_pivot_lag.py` and by the lookahead property test, so settling the tie
+convention cannot accidentally loosen the thing that actually matters.
 
 ---
 
