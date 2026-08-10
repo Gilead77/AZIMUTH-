@@ -40,6 +40,8 @@ deciding them after results are visible is itself a researcher degree of freedom
 | 16 | Component collinearity predicts the ablation | `02` §5 | M1 | UNADJUDICATED |
 | 17 | `default.yaml` path discrepancy | `00` vs `04` §3 | M1 | UNADJUDICATED |
 | 18 | `ta.pivothigh` tie-handling unspecified | `06` §3 | M1 | UNADJUDICATED |
+| 19 | Fixture export cannot verify `x_corr` | `06` §1–2 | M1 | **RESOLVED** — commit 4 |
+| 20 | `htfCalc` hardcodes 14 and 3 | `03` §3, `07` §1 | M2 | UNADJUDICATED |
 
 Fixed in code already (not awaiting adjudication):
 
@@ -587,6 +589,78 @@ line to flip, with `tests/test_pivot_lag.py` pinning current behaviour.
 and is not configurable — it is asserted independently in
 `tests/test_pivot_lag.py` and by the lookahead property test, so settling the tie
 convention cannot accidentally loosen the thing that actually matters.
+
+---
+
+## 19. The fixture export could not verify `x_corr` ✅ RESOLVED
+
+**Where:** `06_PARITY_TESTS.md` §1–2. **Fixed in commit 4, before the first export.**
+
+`06` §1 defines the parity procedure as: load the indicator, export chart data to CSV,
+run `azimuth parity` against it. `06` §2 then assigns `x_corr` a tolerance of 1e-5.
+
+But a TradingView chart-data export contains the base symbol's OHLCV plus the plotted
+series — and the correlation component's **inputs are neither**. The reference closes
+arrive through `request.security` inside `refPack()` (`pine/AZIMUTH.pine:161-168`) and
+are never plotted, so the export carries `x_corr` with nothing to recompute it from.
+Comparing our `x_corr` against Pine's would require sourcing DXY/SPX from a different
+vendor at matching timestamps, which introduces a second discrepancy exactly where the
+first one is being measured.
+
+The consequence is worse than "one component unverified". Correlation is the component
+most likely to fail the ablation (finding 16), so it is the one whose numbers most need
+to be trustworthy before anyone concludes anything from them.
+
+**Fix applied:** `refPack()` now returns the reference close alongside its derived
+values, and the export gains `x_ref1..3`, `x_rho1..3` and `x_crowd`. Python can
+recompute the full chain — log returns → rolling ρ → EMA trend sign → `|ρ|` gate →
+weighted contribution — and localise a mismatch to one step rather than reporting that
+the endpoint disagrees. No new `request.security` calls: still 5 against Pine's limit
+of 40 (`03` §1).
+
+`x_crowd` is included because `crowding` was the subject of the finding 0 precedence
+bug; exporting it is the only way to confirm the fix is live on the chart and not just
+in the file.
+
+**Proposed amendment:** add the new series to `06` §2's assertion table. Suggested
+tolerances: `x_ref*` 1e-6 (raw prices), `x_rho*` 1e-5 (matching `x_corr`), `x_crowd`
+1e-6.
+
+---
+
+## 20. `htfCalc` hardcodes two constants
+
+**Where:** `03_SPEC_PINE.md` §3, `07_PARAMETERS.md` §1. **Decide by M2.**
+
+`pine/AZIMUTH.pine:150-151`:
+
+```pine
+hr = ta.rsi(close, 14)                                  // 14 hardcoded
+sc = (((close > he ? 1 : -1) + (he > he[3] ? 1 : -1) + ...) / 3.0)   // 3 hardcoded
+```
+
+`03` §3 is unambiguous: "Every magic number is an input — no hardcoded constants in the
+calculation block, because the Python sweep must be able to address all of them by the
+same names." Neither value appears in `07` §1 either.
+
+The RSI length is the more substantive of the two. The chart-timeframe RSI is
+configurable via `rsiLen` (default 14, sweep range 9–21), but the HTF RSI feeding
+`htfScore` is pinned at 14 regardless. A sweep over `rsi.length` therefore changes one
+of the two RSI computations and silently leaves the other — so the swept parameter does
+not mean what its name implies, and HTF bias, the **highest-weighted component** at
+1.2, is partly outside the parameter space being searched.
+
+**Handling in code:** added as `htf.rsi_length` (14) and `htf.slope_lookback` (3),
+defaulting to exactly what Pine hardcodes, so behaviour is byte-identical and parity is
+unaffected. `PINE_TO_YAML` lists them under the names the Pine inputs should take
+(`htfRsiLen`, `htfSlopeLb`) so the contract is recorded now and bringing Pine into line
+later needs no second rename.
+
+**Proposed amendment:** add both rows to `07` §1 and the inputs to `AZIMUTH.pine`.
+Recommendation on sweeping: **tie `htf.rsi_length` to `rsi.length`** rather than
+sweeping it independently — they measure the same thing at two sampling rates, and
+varying them separately adds a dimension without adding a distinct hypothesis. Leave
+`htf.slope_lookback` fixed at 3.
 
 ---
 

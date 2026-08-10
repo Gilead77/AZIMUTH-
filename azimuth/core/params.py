@@ -36,6 +36,12 @@ PINE_TO_YAML: dict[str, str] = {
     "htfUse2": "htf.use_tf2",
     "htfEmaLen": "htf.ema_length",
     "htfConfirm": "htf.confirmed_only",
+    # FINDING-20: these two have no Pine input yet -- they are hardcoded at
+    # pine/AZIMUTH.pine:150-151. Listed with their intended Pine names so the
+    # contract is recorded now and the Pine side can be brought into line later
+    # without a second rename.
+    "htfRsiLen": "htf.rsi_length",
+    "htfSlopeLb": "htf.slope_lookback",
     "corrLen": "corr.length",
     "corrMin": "corr.min_abs_rho",
     "corrRefEma": "corr.ref_ema",

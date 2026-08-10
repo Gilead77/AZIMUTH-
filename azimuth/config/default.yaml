@@ -31,6 +31,8 @@ htf:
   tf2: "1D"
   use_tf2: true
   ema_length: 50
+  rsi_length: 14                                # FINDING-20: hardcoded in Pine htfCalc
+  slope_lookback: 3                             # FINDING-20: the `he[3]` in Pine htfCalc
   confirmed_only: true                          # NEVER sweep. false = lookahead. Enforced.
   weight_tf1: 0.6                               # clip(0.6*HTF1 + 0.4*HTF2)
 

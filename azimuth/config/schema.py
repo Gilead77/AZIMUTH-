@@ -118,6 +118,16 @@ class HtfConfig(_Base):
     ema_length: int = Field(default=50, ge=2)
     """Pine ``htfEmaLen``."""
 
+    rsi_length: int = Field(default=14, ge=2)
+    """FINDING-20. ``pine/AZIMUTH.pine:150`` hardcodes ``ta.rsi(close, 14)`` inside
+    ``htfCalc``, contra ``docs/03`` section 3 ("every magic number is an input").
+    Defaulted to 14 so behaviour is byte-identical to the current Pine and parity is
+    unaffected; exists so the sweep can address it by name."""
+
+    slope_lookback: int = Field(default=3, ge=1)
+    """FINDING-20. ``pine/AZIMUTH.pine:151`` hardcodes the ``he[3]`` lookback in the
+    HTF EMA slope term. Same treatment as ``rsi_length``."""
+
     confirmed_only: bool = True
     """Pine ``htfConfirm``. The repaint contract of docs/01 section 4: return
     ``s[1]`` from inside the HTF context so the value is fixed once the HTF bar

@@ -158,6 +158,11 @@ htfScore = clip(htfUse2 and not na(h2) ? (h1 * 0.6 + h2 * 0.4) : nz(h1))
 // ═══════════════════════════ 5. CORRELATION ═══════════════════════════
 ownRet = math.log(close / math.max(close[1], 1e-10))
 
+// Returns the reference CLOSE as well as the derived values, so the parity export
+// carries the inputs and not just the answer. Without `c` in the data window, the
+// Python harness can compare x_corr to itself but cannot recompute it — the log
+// returns, the ρ and the trend sign would all be unverifiable. See
+// docs/11_FINDINGS.md finding 19.
 refPack(bool on, simple string sym) =>
     c   = on ? request.security(sym, timeframe.period, close, lookahead = barmerge.lookahead_off) : na
     ret = on ? math.log(c / math.max(c[1], 1e-10)) : na
@@ -165,11 +170,11 @@ refPack(bool on, simple string sym) =>
     trd = on ? math.sign(c - ta.ema(c, corrRefEma)) : na
     // contribution = ρ × reference trend direction, gated by |ρ| floor
     contrib = on and not na(rho) and math.abs(rho) >= corrMin ? rho * trd : 0.0
-    [rho, contrib, on and not na(rho) and math.abs(rho) >= corrMin ? 1.0 : 0.0]
+    [c, rho, contrib, on and not na(rho) and math.abs(rho) >= corrMin ? 1.0 : 0.0]
 
-[rho1, k1, n1] = refPack(useC1, sym1)
-[rho2, k2, n2] = refPack(useC2, sym2)
-[rho3, k3, n3] = refPack(useC3, sym3)
+[ref1, rho1, k1, n1] = refPack(useC1, sym1)
+[ref2, rho2, k2, n2] = refPack(useC2, sym2)
+[ref3, rho3, k3, n3] = refPack(useC3, sym3)
 
 corrN     = n1 + n2 + n3
 corrScore = corrN > 0 ? clip((k1 + k2 + k3) / corrN) : 0.0
@@ -316,3 +321,19 @@ plot(adxv,      "x_adx",     display = display.data_window)
 plot(pctB,      "x_pctb",    display = display.data_window)
 plot(bwPct,     "x_bwpct",   display = display.data_window)
 plot(state,     "x_state",   display = display.data_window)
+
+// Correlation inputs and intermediates. x_corr alone cannot be verified: the
+// reference closes arrive through request.security and are never otherwise plotted,
+// so the export would contain the answer with none of its inputs. Exporting the
+// reference closes lets Python recompute the whole chain — log returns, ρ, the
+// EMA trend sign, the |ρ| gate — and localise any mismatch to a single step.
+// docs/11_FINDINGS.md finding 19.
+plot(ref1,      "x_ref1",    display = display.data_window)
+plot(ref2,      "x_ref2",    display = display.data_window)
+plot(ref3,      "x_ref3",    display = display.data_window)
+plot(rho1,      "x_rho1",    display = display.data_window)
+plot(rho2,      "x_rho2",    display = display.data_window)
+plot(rho3,      "x_rho3",    display = display.data_window)
+// crowding was the subject of the operator-precedence fix in finding 0; exporting
+// it is the only way to confirm the fix landed on the chart as well as in the file.
+plot(crowding,  "x_crowd",   display = display.data_window)
