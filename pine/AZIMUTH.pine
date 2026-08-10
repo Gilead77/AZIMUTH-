@@ -174,7 +174,10 @@ refPack(bool on, simple string sym) =>
 corrN     = n1 + n2 + n3
 corrScore = corrN > 0 ? clip((k1 + k2 + k3) / corrN) : 0.0
 // Crowding flag: everything moving together = systemic regime, size down
-crowding  = (math.abs(nz(rho1)) + math.abs(nz(rho2)) + math.abs(nz(rho3))) / math.max(useC1?1:0 + (useC2?1:0) + (useC3?1:0), 1)
+// NOTE: the ternaries in the denominator MUST be parenthesised. Pine's `?:` binds
+// looser than `+`, so `useC1?1:0 + (useC2?1:0) + (useC3?1:0)` parses as
+// `useC1 ? 1 : (0 + ...)` and collapses to 1 whenever useC1 is true.
+crowding  = (math.abs(nz(rho1)) + math.abs(nz(rho2)) + math.abs(nz(rho3))) / math.max((useC1?1:0) + (useC2?1:0) + (useC3?1:0), 1)
 
 // ═══════════════════════════ 6. REGIME GATE ═══════════════════════════
 erNum = math.abs(close - close[erLen])

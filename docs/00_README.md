@@ -70,6 +70,7 @@ azimuth/
 | `08_ALERTS.md` | Webhook JSON schema |
 | `09_PREREGISTRATION.md` | Fill this in **before** running the sweep |
 | `10_ROADMAP.md` | Build order and milestones |
+| `11_FINDINGS.md` | Findings raised against 00–10, awaiting adjudication. **Not authoritative** |
 
 ## Quickstart (Pine)
 
