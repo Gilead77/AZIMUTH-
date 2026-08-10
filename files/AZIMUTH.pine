@@ -1,0 +1,315 @@
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════════
+//  AZIMUTH — Composite Signal Engine   v0.1.0
+//  Ribbon 🎀 · Bollinger · RSI · HTF Bias · Cross-Asset Correlation · Regime
+//
+//  Design principle: no single component fires a trade. Each emits a bounded
+//  score in [-1, +1]; a weighted composite in [-100, +100] drives a state
+//  machine with hysteresis, a regime gate and a cooldown.
+//
+//  Research tool. Not financial advice. Do not deploy capital until the
+//  Python validation harness (see docs/05_SPEC_VALIDATION.md) clears it.
+// ═══════════════════════════════════════════════════════════════════════════
+
+indicator("AZIMUTH — Composite Signal Engine", "AZIMUTH", overlay = false,
+     max_labels_count = 500, max_bars_back = 2000)
+
+// ═══════════════════════════ GROUPS ═══════════════════════════
+gR = "🎀 EMA Ribbon"
+gB = "📊 Bollinger Bands"
+gS = "⚡ RSI"
+gH = "🕰️ Higher-Timeframe Bias"
+gC = "🔗 Cross-Asset Correlation"
+gG = "🚦 Regime Gate"
+gW = "⚖️ Weights"
+gX = "🎯 Signal Logic"
+gV = "🎨 Visuals"
+
+// ═══════════════════════════ INPUTS ═══════════════════════════
+// Ribbon
+l1 = input.int(8,   "1", inline = "rb1", group = gR)
+l2 = input.int(13,  "2", inline = "rb1", group = gR)
+l3 = input.int(21,  "3", inline = "rb1", group = gR)
+l4 = input.int(34,  "4", inline = "rb1", group = gR)
+l5 = input.int(55,  "5", inline = "rb2", group = gR)
+l6 = input.int(89,  "6", inline = "rb2", group = gR)
+l7 = input.int(144, "7", inline = "rb2", group = gR)
+l8 = input.int(233, "8", inline = "rb2", group = gR)
+ribSlopeLb  = input.int(5,   "Slope lookback",        group = gR, minval = 1)
+ribCompLb   = input.int(200, "Compression lookback",  group = gR, minval = 20)
+ribCompTh   = input.float(20.0, "Compression pctile <", group = gR)
+
+// Bollinger
+bbLen     = input.int(20,    "Length",              group = gB, minval = 2)
+bbMult    = input.float(2.0, "StdDev mult",         group = gB, minval = 0.1)
+bbLb      = input.int(200,   "Bandwidth lookback",  group = gB, minval = 20)
+bbSqzTh   = input.float(20.0,"Squeeze pctile <",    group = gB)
+
+// RSI
+rsiLen    = input.int(14, "Length",            group = gS, minval = 2)
+rsiSpan   = input.float(25.0, "Score span (±)", group = gS,
+     tooltip = "RSI distance from 50 that maps to a full ±1 score. 25 → RSI 75 = +1.")
+divLb     = input.int(5,  "Divergence pivot legs", group = gS, minval = 2)
+divBonus  = input.float(0.35, "Divergence bonus",   group = gS, minval = 0.0, maxval = 1.0)
+
+// HTF bias
+htfUse2   = input.bool(true,  "Use second HTF",     group = gH)
+htf1      = input.timeframe("240", "HTF 1",         group = gH)
+htf2      = input.timeframe("1D",  "HTF 2",         group = gH)
+htfEmaLen = input.int(50, "HTF EMA length",         group = gH, minval = 2)
+htfConfirm= input.bool(true, "Confirmed HTF bars only (no repaint)", group = gH)
+
+// Correlation
+corrLen   = input.int(60, "Correlation length",     group = gC, minval = 10)
+corrMin   = input.float(0.30, "Min |ρ| to count",   group = gC, minval = 0.0, maxval = 1.0)
+useC1     = input.bool(true,  "", inline = "c1", group = gC)
+sym1      = input.symbol("TVC:DXY", "", inline = "c1", group = gC)
+useC2     = input.bool(true,  "", inline = "c2", group = gC)
+sym2      = input.symbol("SP:SPX",  "", inline = "c2", group = gC)
+useC3     = input.bool(false, "", inline = "c3", group = gC)
+sym3      = input.symbol("TVC:GOLD","", inline = "c3", group = gC)
+corrRefEma= input.int(50, "Reference trend EMA",    group = gC, minval = 2)
+
+// Regime gate
+erLen     = input.int(20,  "Efficiency-ratio length", group = gG, minval = 5)
+erTh      = input.float(0.30, "ER trend threshold",   group = gG)
+adxLen    = input.int(14,  "ADX length",              group = gG, minval = 2)
+adxTh     = input.float(20.0, "ADX trend threshold",  group = gG)
+regimeMode= input.string("Adaptive", "Mode", options = ["Adaptive", "Trend only", "Range only"], group = gG,
+     tooltip = "Adaptive: BB/RSI flip between breakout and mean-reversion polarity based on the gate.")
+
+// Weights
+wRib  = input.float(1.0, "Ribbon",      group = gW, minval = 0.0, step = 0.1)
+wBB   = input.float(0.8, "Bollinger",   group = gW, minval = 0.0, step = 0.1)
+wRSI  = input.float(0.8, "RSI",         group = gW, minval = 0.0, step = 0.1)
+wHTF  = input.float(1.2, "HTF bias",    group = gW, minval = 0.0, step = 0.1)
+wCorr = input.float(0.5, "Correlation", group = gW, minval = 0.0, step = 0.1)
+
+// Signal logic
+enterTh   = input.float(45.0, "Entry threshold",  group = gX, minval = 1.0, maxval = 100.0)
+exitTh    = input.float(15.0, "Exit threshold",   group = gX, minval = 0.0, maxval = 100.0,
+     tooltip = "Hysteresis: position closes when score decays back inside this band.")
+cooldown  = input.int(8, "Cooldown bars",         group = gX, minval = 0)
+reqTrend  = input.bool(true,  "Require trend regime for entries", group = gX)
+reqHTF    = input.bool(true,  "Require HTF agreement",            group = gX)
+atrLen    = input.int(14,   "ATR length",   group = gX, minval = 1)
+atrStop   = input.float(2.0,"Stop × ATR",   group = gX, minval = 0.1)
+rrTarget  = input.float(2.0,"Target (R)",   group = gX, minval = 0.1)
+
+// Visuals
+showRibbon = input.bool(true, "Ribbon overlay",  group = gV)
+showBB     = input.bool(true, "Bollinger overlay", group = gV)
+showLevels = input.bool(true, "Stop/target lines", group = gV)
+showTable  = input.bool(true, "Dashboard",       group = gV)
+
+// ═══════════════════════════ HELPERS ═══════════════════════════
+clip(float x) => math.max(-1.0, math.min(1.0, x))
+
+atr = ta.atr(atrLen)
+
+// ═══════════════════════════ 1. RIBBON 🎀 ═══════════════════════════
+e1 = ta.ema(close, l1), e2 = ta.ema(close, l2)
+e3 = ta.ema(close, l3), e4 = ta.ema(close, l4)
+e5 = ta.ema(close, l5), e6 = ta.ema(close, l6)
+e7 = ta.ema(close, l7), e8 = ta.ema(close, l8)
+
+emas = array.from(e1, e2, e3, e4, e5, e6, e7, e8)
+
+int bullPairs = 0
+for i = 0 to 6
+    bullPairs += array.get(emas, i) > array.get(emas, i + 1) ? 1 : 0
+ribOrder = (bullPairs / 7.0) * 2.0 - 1.0                       // [-1, +1] stacking
+
+ribSlope = clip((e4 - e4[ribSlopeLb]) / math.max(atr * ribSlopeLb, 1e-10))
+ribScore = clip(0.65 * ribOrder + 0.35 * ribSlope)
+
+ribWidth   = (array.max(emas) - array.min(emas)) / close
+ribWidthPc = ta.percentrank(ribWidth, ribCompLb)
+ribCompress = ribWidthPc < ribCompTh                            // coiled → breakout setup
+
+// ═══════════════════════════ 2. BOLLINGER ═══════════════════════════
+[bbBasis, bbUpper, bbLower] = ta.bb(close, bbLen, bbMult)
+pctB   = (close - bbLower) / math.max(bbUpper - bbLower, 1e-10)
+bwidth = (bbUpper - bbLower) / math.max(bbBasis, 1e-10)
+bwPct  = ta.percentrank(bwidth, bbLb)
+bbSqueeze = bwPct < bbSqzTh
+
+// ═══════════════════════════ 3. RSI ═══════════════════════════
+rsi = ta.rsi(close, rsiLen)
+
+plF = not na(ta.pivotlow(rsi, divLb, divLb))
+phF = not na(ta.pivothigh(rsi, divLb, divLb))
+bullDiv = plF and ta.valuewhen(plF, rsi[divLb], 0)  > ta.valuewhen(plF, rsi[divLb], 1)
+             and ta.valuewhen(plF, low[divLb], 0)   < ta.valuewhen(plF, low[divLb], 1)
+bearDiv = phF and ta.valuewhen(phF, rsi[divLb], 0)  < ta.valuewhen(phF, rsi[divLb], 1)
+             and ta.valuewhen(phF, high[divLb], 0)  > ta.valuewhen(phF, high[divLb], 1)
+
+// ═══════════════════════════ 4. HTF BIAS ═══════════════════════════
+htfCalc(int len) =>
+    he = ta.ema(close, len)
+    hr = ta.rsi(close, 14)
+    sc = (((close > he ? 1 : -1) + (he > he[3] ? 1 : -1) + (hr > 50 ? 1 : -1)) / 3.0)
+    htfConfirm ? sc[1] : sc
+
+h1 = request.security(syminfo.tickerid, htf1, htfCalc(htfEmaLen), lookahead = barmerge.lookahead_off)
+h2 = htfUse2 ? request.security(syminfo.tickerid, htf2, htfCalc(htfEmaLen), lookahead = barmerge.lookahead_off) : na
+htfScore = clip(htfUse2 and not na(h2) ? (h1 * 0.6 + h2 * 0.4) : nz(h1))
+
+// ═══════════════════════════ 5. CORRELATION ═══════════════════════════
+ownRet = math.log(close / math.max(close[1], 1e-10))
+
+refPack(bool on, simple string sym) =>
+    c   = on ? request.security(sym, timeframe.period, close, lookahead = barmerge.lookahead_off) : na
+    ret = on ? math.log(c / math.max(c[1], 1e-10)) : na
+    rho = on ? ta.correlation(ownRet, ret, corrLen) : na
+    trd = on ? math.sign(c - ta.ema(c, corrRefEma)) : na
+    // contribution = ρ × reference trend direction, gated by |ρ| floor
+    contrib = on and not na(rho) and math.abs(rho) >= corrMin ? rho * trd : 0.0
+    [rho, contrib, on and not na(rho) and math.abs(rho) >= corrMin ? 1.0 : 0.0]
+
+[rho1, k1, n1] = refPack(useC1, sym1)
+[rho2, k2, n2] = refPack(useC2, sym2)
+[rho3, k3, n3] = refPack(useC3, sym3)
+
+corrN     = n1 + n2 + n3
+corrScore = corrN > 0 ? clip((k1 + k2 + k3) / corrN) : 0.0
+// Crowding flag: everything moving together = systemic regime, size down
+crowding  = (math.abs(nz(rho1)) + math.abs(nz(rho2)) + math.abs(nz(rho3))) / math.max(useC1?1:0 + (useC2?1:0) + (useC3?1:0), 1)
+
+// ═══════════════════════════ 6. REGIME GATE ═══════════════════════════
+erNum = math.abs(close - close[erLen])
+erDen = math.sum(math.abs(close - close[1]), erLen)
+er    = erNum / math.max(erDen, 1e-10)
+[diP, diM, adxv] = ta.dmi(adxLen, adxLen)
+
+trendingRaw = er > erTh or adxv > adxTh
+trending = regimeMode == "Trend only" ? true : regimeMode == "Range only" ? false : trendingRaw
+
+// Polarity flip: breakout logic in trend, fade logic in range
+bbScore  = clip(trending ? (pctB - 0.5) * 2.0 : (0.5 - pctB) * 2.0)
+rsiBase  = clip(trending ? (rsi - 50.0) / rsiSpan : (50.0 - rsi) / rsiSpan)
+rsiScore = clip(rsiBase + (bullDiv ? divBonus : 0.0) - (bearDiv ? divBonus : 0.0))
+
+// ═══════════════════════════ COMPOSITE ═══════════════════════════
+wSum  = math.max(wRib + wBB + wRSI + wHTF + wCorr, 1e-10)
+score = 100.0 * (wRib * ribScore + wBB * bbScore + wRSI * rsiScore
+                 + wHTF * htfScore + wCorr * corrScore) / wSum
+
+// ═══════════════════════════ STATE MACHINE ═══════════════════════════
+var int   state    = 0        // -1 short, 0 flat, +1 long
+var int   lastBar  = -99999
+var float entryPx  = na
+var float stopPx   = na
+var float tgtPx    = na
+
+cooled   = bar_index - lastBar >= cooldown
+gateOK   = (not reqTrend or trending)
+htfLongOK  = not reqHTF or htfScore > 0
+htfShortOK = not reqHTF or htfScore < 0
+
+longTrig  = state <= 0 and ta.crossover(score,  enterTh) and cooled and gateOK and htfLongOK
+shortTrig = state >= 0 and ta.crossunder(score, -enterTh) and cooled and gateOK and htfShortOK
+exitLong  = state ==  1 and score <  exitTh
+exitShort = state == -1 and score > -exitTh
+
+if longTrig
+    state := 1, lastBar := bar_index, entryPx := close
+    stopPx := close - atrStop * atr
+    tgtPx  := close + atrStop * atr * rrTarget
+else if shortTrig
+    state := -1, lastBar := bar_index, entryPx := close
+    stopPx := close + atrStop * atr
+    tgtPx  := close - atrStop * atr * rrTarget
+else if exitLong or exitShort
+    state := 0, entryPx := na, stopPx := na, tgtPx := na
+
+// ═══════════════════════════ PLOTS ═══════════════════════════
+scCol = score > enterTh ? color.new(#00c853, 0) : score < -enterTh ? color.new(#d50000, 0) :
+        score > 0 ? color.new(#00c853, 55) : color.new(#d50000, 55)
+
+plot(score, "AZIMUTH Score", color = scCol, linewidth = 2)
+plot(ta.ema(score, 5), "Score EMA", color = color.new(color.gray, 40))
+hline(0, "Zero", color = color.new(color.gray, 60))
+hline(enterTh,  "Long entry",  color = color.new(#00c853, 45), linestyle = hline.style_dashed)
+hline(-enterTh, "Short entry", color = color.new(#d50000, 45), linestyle = hline.style_dashed)
+fill(hline(exitTh, display = display.none), hline(-exitTh, display = display.none),
+     color = color.new(color.gray, 92), title = "Neutral band")
+
+bgcolor(bbSqueeze and ribCompress ? color.new(color.orange, 88) : na, title = "Coiled")
+
+plotshape(longTrig,  "BUY",  shape.triangleup,   location.bottom, color.new(#00c853, 0), size = size.small, text = "▲")
+plotshape(shortTrig, "SELL", shape.triangledown, location.top,    color.new(#d50000, 0), size = size.small, text = "▼")
+
+// Overlay elements (Pine v6 force_overlay)
+rc = ribOrder > 0.5 ? color.new(#26a69a, 55) : ribOrder < -0.5 ? color.new(#ef5350, 55) : color.new(color.gray, 70)
+p1 = plot(showRibbon ? e1 : na, "EMA1", rc, force_overlay = true)
+p8 = plot(showRibbon ? e8 : na, "EMA8", rc, force_overlay = true)
+plot(showRibbon ? e2 : na, "EMA2", rc, force_overlay = true)
+plot(showRibbon ? e3 : na, "EMA3", rc, force_overlay = true)
+plot(showRibbon ? e4 : na, "EMA4", rc, force_overlay = true)
+plot(showRibbon ? e5 : na, "EMA5", rc, force_overlay = true)
+plot(showRibbon ? e6 : na, "EMA6", rc, force_overlay = true)
+plot(showRibbon ? e7 : na, "EMA7", rc, force_overlay = true)
+fill(p1, p8, color = rc, title = "Ribbon fill")
+
+bu = plot(showBB ? bbUpper : na, "BB Upper", color.new(color.blue, 55), force_overlay = true)
+bl = plot(showBB ? bbLower : na, "BB Lower", color.new(color.blue, 55), force_overlay = true)
+plot(showBB ? bbBasis : na, "BB Basis", color.new(color.blue, 35), force_overlay = true)
+fill(bu, bl, color = bbSqueeze ? color.new(color.orange, 88) : color.new(color.blue, 94), title = "BB fill")
+
+plot(showLevels and state != 0 ? stopPx : na, "Stop",   color.new(color.red, 0),  style = plot.style_linebr, force_overlay = true)
+plot(showLevels and state != 0 ? tgtPx  : na, "Target", color.new(color.green, 0),style = plot.style_linebr, force_overlay = true)
+
+// ═══════════════════════════ DASHBOARD ═══════════════════════════
+f_bar(float v) => str.tostring(math.round(v * 100) / 100)
+f_col(float v) => v > 0.15 ? color.new(#00c853, 20) : v < -0.15 ? color.new(#d50000, 20) : color.new(color.gray, 40)
+
+if showTable and barstate.islast
+    var table t = table.new(position.top_right, 2, 9, border_width = 1)
+    table.cell(t, 0, 0, "AZIMUTH", text_color = color.white, bgcolor = color.new(color.black, 20))
+    table.cell(t, 1, 0, f_bar(score), text_color = color.white, bgcolor = f_col(score / 100))
+    table.cell(t, 0, 1, "Ribbon 🎀"), table.cell(t, 1, 1, f_bar(ribScore), bgcolor = f_col(ribScore))
+    table.cell(t, 0, 2, "Bollinger"),  table.cell(t, 1, 2, f_bar(bbScore),  bgcolor = f_col(bbScore))
+    table.cell(t, 0, 3, "RSI"),        table.cell(t, 1, 3, f_bar(rsiScore), bgcolor = f_col(rsiScore))
+    table.cell(t, 0, 4, "HTF"),        table.cell(t, 1, 4, f_bar(htfScore), bgcolor = f_col(htfScore))
+    table.cell(t, 0, 5, "Corr 🔗"),    table.cell(t, 1, 5, f_bar(corrScore),bgcolor = f_col(corrScore))
+    table.cell(t, 0, 6, "Regime"),     table.cell(t, 1, 6, trending ? "TREND" : "RANGE")
+    table.cell(t, 0, 7, "Squeeze"),    table.cell(t, 1, 7, bbSqueeze ? (ribCompress ? "COILED" : "BB") : "—")
+    table.cell(t, 0, 8, "Crowding"),   table.cell(t, 1, 8, f_bar(crowding))
+
+// ═══════════════════════════ ALERTS ═══════════════════════════
+payload(string side) =>
+    '{"strategy":"AZIMUTH","v":"0.1.0","side":"' + side +
+     '","symbol":"' + syminfo.tickerid +
+     '","tf":"' + timeframe.period +
+     '","time":"' + str.format_time(time_close, "yyyy-MM-dd'T'HH:mm:ssZ", "UTC") +
+     '","price":' + str.tostring(close) +
+     ',"score":' + str.tostring(math.round(score * 100) / 100) +
+     ',"stop":' + str.tostring(stopPx) +
+     ',"target":' + str.tostring(tgtPx) +
+     ',"regime":"' + (trending ? "trend" : "range") +
+     '","htf":' + str.tostring(math.round(htfScore * 100) / 100) +
+     ',"crowding":' + str.tostring(math.round(crowding * 100) / 100) + '}'
+
+if longTrig and barstate.isconfirmed
+    alert(payload("long"), alert.freq_once_per_bar_close)
+if shortTrig and barstate.isconfirmed
+    alert(payload("short"), alert.freq_once_per_bar_close)
+if (exitLong or exitShort) and barstate.isconfirmed
+    alert(payload("flat"), alert.freq_once_per_bar_close)
+
+alertcondition(longTrig,  "AZIMUTH Long",  "AZIMUTH long signal")
+alertcondition(shortTrig, "AZIMUTH Short", "AZIMUTH short signal")
+alertcondition(bbSqueeze and ribCompress, "AZIMUTH Coiled", "Volatility compression — breakout watch")
+
+// ═══════════════════════════ EXPORT (for Python parity) ═══════════════════════════
+plot(ribScore,  "x_ribbon",  display = display.data_window)
+plot(bbScore,   "x_bb",      display = display.data_window)
+plot(rsiScore,  "x_rsi",     display = display.data_window)
+plot(htfScore,  "x_htf",     display = display.data_window)
+plot(corrScore, "x_corr",    display = display.data_window)
+plot(er,        "x_er",      display = display.data_window)
+plot(adxv,      "x_adx",     display = display.data_window)
+plot(pctB,      "x_pctb",    display = display.data_window)
+plot(bwPct,     "x_bwpct",   display = display.data_window)
+plot(state,     "x_state",   display = display.data_window)

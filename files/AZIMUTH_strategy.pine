@@ -1,0 +1,75 @@
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════════
+//  AZIMUTH STRATEGY WRAPPER v0.1.0
+//  Identical signal core to AZIMUTH.pine — replaces plotshape with orders so
+//  TradingView's Strategy Tester can produce a first-pass equity curve.
+//
+//  ⚠️  The TV Strategy Tester is NOT the validation step. It has no
+//      walk-forward, no multiple-testing correction and no permutation null.
+//      Treat its output as a smoke test only. Real validation lives in the
+//      Python harness (docs/05_SPEC_VALIDATION.md).
+// ═══════════════════════════════════════════════════════════════════════════
+
+strategy("AZIMUTH Strategy", "AZIMUTH-S", overlay = true,
+     initial_capital        = 10000,
+     default_qty_type       = strategy.percent_of_equity,
+     default_qty_value      = 100,
+     commission_type        = strategy.commission.percent,
+     commission_value       = 0.04,
+     slippage               = 2,
+     process_orders_on_close= false,
+     calc_on_every_tick     = false,
+     pyramiding             = 0)
+
+// ─────────────────────────────────────────────────────────────────────
+// BUILD NOTE FOR CLAUDE CODE:
+// Do not fork the maths. Extract every calculation block from AZIMUTH.pine
+// (Ribbon → Composite) into `pine/azimuth_core.pine` as a Pine library
+// (`//@version=6` + `library("azimuth_core")`) exporting:
+//
+//   export composite(...) => [score, ribScore, bbScore, rsiScore,
+//                             htfScore, corrScore, trending, atr]
+//
+// Then BOTH AZIMUTH.pine and AZIMUTH_strategy.pine import it:
+//   import <username>/azimuth_core/1 as az
+//
+// This guarantees the indicator and the strategy can never drift apart —
+// the single most common source of "my backtest doesn't match my alerts".
+// Until the library is published, keep this file as a literal copy of the
+// core block and add a CI check (scripts/check_pine_parity.py) that diffs
+// the two core sections and fails the build if they differ.
+// ─────────────────────────────────────────────────────────────────────
+
+// <<< PASTE AZIMUTH.pine INPUT + CALCULATION BLOCK HERE (lines: GROUPS → COMPOSITE) >>>
+// Placeholder so the file compiles standalone during scaffolding:
+score    = 0.0
+trending = true
+atr      = ta.atr(14)
+
+enterTh  = input.float(45.0, "Entry threshold")
+exitTh   = input.float(15.0, "Exit threshold")
+atrStop  = input.float(2.0,  "Stop × ATR")
+rrTarget = input.float(2.0,  "Target (R)")
+allowLong  = input.bool(true, "Longs")
+allowShort = input.bool(true, "Shorts")
+
+// Date window — always run out-of-sample separately
+useWindow = input.bool(false, "Limit date range", group = "Window")
+fromDate  = input.time(timestamp("01 Jan 2018"), "From", group = "Window")
+toDate    = input.time(timestamp("01 Jan 2030"), "To",   group = "Window")
+inWindow  = not useWindow or (time >= fromDate and time <= toDate)
+
+longEntry  = allowLong  and ta.crossover(score,  enterTh) and trending and inWindow
+shortEntry = allowShort and ta.crossunder(score, -enterTh) and trending and inWindow
+
+if longEntry
+    strategy.entry("L", strategy.long)
+    strategy.exit("L-x", "L", stop = close - atrStop * atr, limit = close + atrStop * atr * rrTarget)
+if shortEntry
+    strategy.entry("S", strategy.short)
+    strategy.exit("S-x", "S", stop = close + atrStop * atr, limit = close - atrStop * atr * rrTarget)
+
+if strategy.position_size > 0 and score < exitTh
+    strategy.close("L", comment = "decay")
+if strategy.position_size < 0 and score > -exitTh
+    strategy.close("S", comment = "decay")
