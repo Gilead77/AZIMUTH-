@@ -39,6 +39,8 @@ import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
+from azimuth.config.schema import SignalConfig, load_default
+from azimuth.core import bollinger, correlation, htf, pipeline, regime, ribbon, rsi_mod, signals
 from azimuth.core import primitives as p
 
 # ── input generation ────────────────────────────────────────────────────────────
@@ -128,6 +130,106 @@ CASES: list[Case] = [
     ),
 ]
 
+# ── components and the assembled pipeline ───────────────────────────────────────
+#
+# The primitives above are the easy half. The components are where lookahead
+# actually bites: the HTF path resamples, shifts and forward-fills, and docs/04
+# section 6 calls omitting that shift "the most likely source of a fake edge".
+# Running the same property over the assembled pipeline is what makes the
+# guarantee end-to-end rather than per-function.
+
+_CONFIG = load_default()
+
+COMPONENT_CASES: list[Case] = [
+    Case("ribbon.order", lambda d: ribbon.ribbon_order(d["close"], _RIBBON)),
+    Case(
+        "ribbon.score",
+        lambda d: ribbon.ribbon_score(d["close"], _atr(d), _RIBBON, 3),
+    ),
+    Case("ribbon.compression", lambda d: ribbon.ribbon_compression(d["close"], _RIBBON, 10, 20.0)),
+    Case("bollinger.percent_b", lambda d: bollinger.percent_b(d["close"], 5, 2.0)),
+    Case("bollinger.bwpct", lambda d: bollinger.bandwidth_pctile(d["close"], 5, 2.0, 10)),
+    Case("bollinger.score", lambda d: bollinger.bollinger_score(d["close"], _trending(d), 5, 2.0)),
+    Case(
+        "rsi_mod.base", lambda d: rsi_mod.rsi_base_score(p.rsi(d["close"], 5), _trending(d), 25.0)
+    ),
+    Case(
+        "rsi_mod.divergences",
+        lambda d: rsi_mod.divergences(p.rsi(d["close"], 5), d["high"], d["low"], 3),
+    ),
+    Case(
+        "rsi_mod.score",
+        lambda d: rsi_mod.rsi_score(
+            d["close"], d["high"], d["low"], _trending(d), 5, 25.0, 3, 0.35
+        ),
+    ),
+    # The HTF path: resample -> bias -> shift -> reindex. The one most likely to
+    # leak, and the one whose leak would be least visible.
+    Case("htf.component", lambda d: htf.htf_component(d, "240", None, 5, 5, 3)),
+    Case("htf.component_two_horizons", lambda d: htf.htf_component(d, "240", "1D", 5, 5, 3)),
+    Case("correlation.log_returns", lambda d: correlation.log_returns(d["close"])),
+    Case(
+        "correlation.score",
+        lambda d: correlation.correlation_score(d["close"], [d["ref"]], 10, 0.3, 5),
+        atol=1e-12,
+        note="rolling corr accumulator",
+    ),
+    Case(
+        "correlation.effective_obs",
+        lambda d: correlation.effective_observations(d["close"], d["ref"], 10),
+    ),
+    Case("regime.efficiency_ratio", lambda d: regime.efficiency_ratio(d["close"], 10)),
+    Case("regime.adx", lambda d: regime.adx(d["high"], d["low"], d["close"], 5)),
+    Case("regime.trending", lambda d: _trending(d)),
+    Case("signals.state_machine", lambda d: _state(d)),
+    # End to end.
+    Case("pipeline.score", lambda d: _pipeline(d)["score"], atol=1e-12),
+    Case("pipeline.x_state", lambda d: _pipeline(d)["x_state"]),
+    Case("pipeline.x_htf", lambda d: _pipeline(d)["x_htf"]),
+]
+
+_RIBBON = (3, 5, 8, 13, 21, 34, 55, 89)
+"""Short ribbon so the generated 40-120 bar series still produce values."""
+
+
+def _atr(d: pd.DataFrame) -> pd.Series:
+    return p.atr(d["high"], d["low"], d["close"], 5)
+
+
+def _trending(d: pd.DataFrame) -> pd.Series:
+    return regime.trending(d["high"], d["low"], d["close"], 10, 0.3, 5, 20.0, "adaptive")
+
+
+def _state(d: pd.DataFrame) -> pd.Series:
+    score = ribbon.ribbon_score(d["close"], _atr(d), _RIBBON, 3) * 100.0
+    htf_series = htf.htf_component(d, "240", None, 5, 5, 3)
+    return signals.state_machine(score, _trending(d), htf_series, _SIGNAL)["state"]
+
+
+_SIGNAL = SignalConfig(enter=45.0, exit=15.0, cooldown_bars=3)
+
+_PIPELINE_CONFIG = _CONFIG.model_copy(
+    update={
+        "ribbon": _CONFIG.ribbon.model_copy(update={"lengths": _RIBBON, "compress_lookback": 20}),
+        "bollinger": _CONFIG.bollinger.model_copy(update={"length": 5, "bw_lookback": 20}),
+        "rsi": _CONFIG.rsi.model_copy(update={"length": 5, "div_legs": 3}),
+        "htf": _CONFIG.htf.model_copy(update={"tf1": "240", "tf2": "1D", "ema_length": 5}),
+        "corr": _CONFIG.corr.model_copy(update={"length": 10, "ref_ema": 5}),
+        "regime": _CONFIG.regime.model_copy(update={"er_length": 10, "adx_length": 5}),
+        "risk": _CONFIG.risk.model_copy(update={"atr_length": 5}),
+    }
+)
+
+
+def _pipeline(d: pd.DataFrame) -> pd.DataFrame:
+    return pipeline.compute_frame(
+        d[["open", "high", "low", "close", "volume"]],
+        _PIPELINE_CONFIG,
+        refs={"TVC:DXY": d["ref"]},
+    )
+
+
+CASES += COMPONENT_CASES
 CASES_BY_NAME = {c.name: c for c in CASES}
 
 
