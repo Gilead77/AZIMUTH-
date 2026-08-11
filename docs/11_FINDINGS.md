@@ -43,6 +43,9 @@ deciding them after results are visible is itself a researcher degree of freedom
 | 19 | Fixture export cannot verify `x_corr` | `06` §1–2 | M1 | **RESOLVED** — commit 4 |
 | 20 | `htfCalc` hardcodes 14 and 3 | `03` §3, `07` §1 | M2 | UNADJUDICATED |
 | 21 | **HTF resample `closed="right"` is wrong** | `04` §6 | M1 | UNADJUDICATED ⚠️ |
+| 22 | A boolean toggle does not gate `request.*` | `03` §1 | M2 | UNADJUDICATED |
+| 23 | **Stateful `ta.*` behind short-circuiting `and`** | `03` §6 | M1 | **FIXED** — commit 6 ⚠️ |
+| 24 | Continuation indented by a multiple of 4 | — | M1 | **FIXED** — commit 6 |
 
 Fixed in code already (not awaiting adjudication):
 
@@ -717,6 +720,99 @@ difference so the spec's snippet cannot be pasted back in, and
 **Proposed amendment:** correct the snippet in `04` §6 to `closed="left"`, and add a
 sentence stating that canonical-frame timestamps are bar-open times — the whole
 question turns on that, and the spec never says it.
+
+---
+
+## 22. A boolean toggle does not make an unused reference free
+
+**Where:** `03_SPEC_PINE.md` §1. **Decide by M2.**
+
+`03` §1 states:
+
+> Any new reference symbol must be added behind a boolean toggle so unused refs
+> cost nothing.
+
+That is false. Pine issues every `request.*()` call on every bar regardless of any
+guarding ternary — `on ? request.security(...) : na` selects between the *results*,
+it does not skip the request. The `useC1/2/3` toggles therefore save nothing.
+
+The call budget is not the problem: 3 `request.security` call sites, 5 at runtime,
+against `03` §1's limit of 40. The problem is the **third default reference**.
+`corr.references[2]` is `TVC:GOLD` with `enabled: false`, and Pine fetches it
+anyway — so an unavailable or mistyped ticker can produce a load error on a
+reference the user believes is switched off, with nothing on screen to connect the
+two.
+
+**Proposed amendment:** correct the sentence in `03` §1 — a toggle gates the
+reference's *contribution*, not its cost. Recommend the third default reference be
+cleared to an empty symbol rather than merely disabled, so the shipped default
+fetches only what it uses.
+
+---
+
+## 23. Stateful `ta.*` calls behind short-circuiting operators ✅ FIXED
+
+**Where:** `03_SPEC_PINE.md` §6. **Fixed in commit 6.** Surfaced by the first
+TradingView compile (CW10002).
+
+`03` §6 says:
+
+> `ta.*` functions must be called unconditionally at global scope, never inside
+> `if` blocks — Pine's execution model requires it and conditional calls produce
+> silently wrong series.
+
+The rule is right; the *scope* is too narrow. It names `if` blocks, but the form
+that actually occurred three times in the shipped indicator is a short-circuiting
+`and` or a ternary. A stateful `ta.*` after `x and …` is skipped whenever `x` is
+false, and its internal history desynchronises exactly as it would inside an `if`.
+
+| Site | Call | Reaches |
+|---|---|---|
+| `142-145` | `ta.valuewhen` × 8, behind `plF and …` | `x_rsi`, via the divergence bonus |
+| `218-219` | `ta.crossover` / `ta.crossunder`, behind `state <= 0 and …` | **`x_state`** |
+| `169-170` | `ta.correlation`, `ta.ema`, behind `on ? … : na` | `x_corr`, `x_rho*` |
+
+**The middle row is the serious one, and it is not a parity problem.**
+`ta.crossover(score, enterTh)` needs the previous bar's score. While a position is
+open, `state <= 0` is false, so the call may be skipped; when the position closes
+and state returns to 0, the function's notion of "previous bar" is stale. The first
+bar after every exit can therefore report a cross that did not happen, or miss one
+that did. That is wrong signals on the live chart, independent of any Python
+comparison — and `x_state` is the series `06` §2 compares at **exact** tolerance.
+
+Only TradingView reported it, and only partially: the syntax error at line 235
+(finding 24) halted analysis, so the compiler flagged the `valuewhen` site and
+never reached the other two. They were found by scanning for the pattern.
+
+**Fix applied:** all three hoisted to globals evaluated on every bar, with the
+gating moved to the outputs. This brings Pine *to* the Python rather than the
+reverse — `azimuth/core/signals.py::_entry_gates` already computes the crossover
+series across the whole score before applying gates, and
+`azimuth/core/rsi_mod.py::divergences` combines fully-computed `valuewhen` series
+with elementwise `&`. No Python change was required and none was made.
+
+**Proposed amendment:** widen `03` §6 to "never inside `if` blocks, and never after
+a short-circuiting `and`/`or` or inside a ternary branch — assign to a global
+variable and use that". Worth adding a CI grep for the pattern, since the compiler
+only reports the first instance it reaches.
+
+---
+
+## 24. Continuation lines indented by a multiple of 4 ✅ FIXED
+
+**Where:** `pine/AZIMUTH.pine:236`. **Fixed in commit 6.**
+
+Pine treats a line indented by a multiple of 4 spaces as a **new statement**, and
+any other indentation as a continuation of the line above. The `scCol` ternary
+wrapped onto a line indented 8 spaces, leaving line 235 ending on a dangling `:` —
+`end of line without line continuation` (CE10156).
+
+Every other continuation in the file uses 5 spaces; this was the only one at a
+multiple of 4. Re-indented to match, with a comment recording the rule.
+
+Cosmetic in effect — `scCol` is the score plot's colour and touches no `x_*`
+export — but it blocked compilation entirely, which is what prevented finding 23's
+other two sites from being reported.
 
 ---
 
