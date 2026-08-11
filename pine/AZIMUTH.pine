@@ -139,10 +139,29 @@ rsi = ta.rsi(close, rsiLen)
 
 plF = not na(ta.pivotlow(rsi, divLb, divLb))
 phF = not na(ta.pivothigh(rsi, divLb, divLb))
-bullDiv = plF and ta.valuewhen(plF, rsi[divLb], 0)  > ta.valuewhen(plF, rsi[divLb], 1)
-             and ta.valuewhen(plF, low[divLb], 0)   < ta.valuewhen(plF, low[divLb], 1)
-bearDiv = phF and ta.valuewhen(phF, rsi[divLb], 0)  < ta.valuewhen(phF, rsi[divLb], 1)
-             and ta.valuewhen(phF, high[divLb], 0)  > ta.valuewhen(phF, high[divLb], 1)
+
+// ta.valuewhen is STATEFUL and must be evaluated on every bar. Written inline
+// behind `plF and ...` it sits after a short-circuiting operator, so it is skipped
+// whenever plF is false and its history desynchronises (CW10002). Hoisted to
+// globals so every call runs unconditionally.
+//
+// This also matches azimuth/core/rsi_mod.py::divergences, which combines
+// fully-computed valuewhen series with elementwise `&`. Occurrence 0 is this
+// pivot, 1 the previous one; the [divLb] offsets read back from the confirmation
+// bar to the pivot bar.
+plRsiNow   = ta.valuewhen(plF, rsi[divLb],  0)
+plRsiPrev  = ta.valuewhen(plF, rsi[divLb],  1)
+plLowNow   = ta.valuewhen(plF, low[divLb],  0)
+plLowPrev  = ta.valuewhen(plF, low[divLb],  1)
+phRsiNow   = ta.valuewhen(phF, rsi[divLb],  0)
+phRsiPrev  = ta.valuewhen(phF, rsi[divLb],  1)
+phHighNow  = ta.valuewhen(phF, high[divLb], 0)
+phHighPrev = ta.valuewhen(phF, high[divLb], 1)
+
+// Bullish: price LOWER low while RSI makes a HIGHER low. The two comparisons point
+// in opposite directions -- swapping them yields a plausible but inverted signal.
+bullDiv = plF and plRsiNow > plRsiPrev and plLowNow  < plLowPrev
+bearDiv = phF and phRsiNow < phRsiPrev and phHighNow > phHighPrev
 
 // ═══════════════════════════ 4. HTF BIAS ═══════════════════════════
 htfCalc(int len) =>
@@ -163,14 +182,26 @@ ownRet = math.log(close / math.max(close[1], 1e-10))
 // Python harness can compare x_corr to itself but cannot recompute it — the log
 // returns, the ρ and the trend sign would all be unverifiable. See
 // docs/11_FINDINGS.md finding 19.
+// ta.correlation and ta.ema are STATEFUL and were previously written as
+// `on ? ta.correlation(...) : na`, which risks skipping them on bars where the
+// toggle is off and desynchronising their history (CW10002, same class as the
+// divergence block above). They now run unconditionally and only the OUTPUTS are
+// gated, which is also what azimuth/core/correlation.py does.
+//
+// Dropping the `on ?` guard on request.security costs nothing: Pine issues the
+// request on every bar regardless of the ternary, so the toggle never saved a
+// call in the first place (docs/11_FINDINGS.md finding 22).
+//
+// Disabled references still export na for x_ref*/x_rho*, so the Python pipeline
+// -- which emits those columns only for enabled references -- needs no change.
 refPack(bool on, simple string sym) =>
-    c   = on ? request.security(sym, timeframe.period, close, lookahead = barmerge.lookahead_off) : na
-    ret = on ? math.log(c / math.max(c[1], 1e-10)) : na
-    rho = on ? ta.correlation(ownRet, ret, corrLen) : na
-    trd = on ? math.sign(c - ta.ema(c, corrRefEma)) : na
+    c   = request.security(sym, timeframe.period, close, lookahead = barmerge.lookahead_off)
+    ret = math.log(c / math.max(c[1], 1e-10))
+    rho = ta.correlation(ownRet, ret, corrLen)
+    trd = math.sign(c - ta.ema(c, corrRefEma))
     // contribution = ρ × reference trend direction, gated by |ρ| floor
-    contrib = on and not na(rho) and math.abs(rho) >= corrMin ? rho * trd : 0.0
-    [c, rho, contrib, on and not na(rho) and math.abs(rho) >= corrMin ? 1.0 : 0.0]
+    ok  = on and not na(rho) and math.abs(rho) >= corrMin
+    [on ? c : na, on ? rho : na, ok ? rho * trd : 0.0, ok ? 1.0 : 0.0]
 
 [ref1, rho1, k1, n1] = refPack(useC1, sym1)
 [ref2, rho2, k2, n2] = refPack(useC2, sym2)
@@ -215,8 +246,22 @@ gateOK   = (not reqTrend or trending)
 htfLongOK  = not reqHTF or htfScore > 0
 htfShortOK = not reqHTF or htfScore < 0
 
-longTrig  = state <= 0 and ta.crossover(score,  enterTh) and cooled and gateOK and htfLongOK
-shortTrig = state >= 0 and ta.crossunder(score, -enterTh) and cooled and gateOK and htfShortOK
+// ta.crossover/ta.crossunder are STATEFUL -- they compare against the previous
+// bar's score. Written inline after `state <= 0 and ...` they sit behind a
+// short-circuiting operator, so while a position is open the condition is false
+// and the call may be skipped. Its notion of "previous bar" then goes stale, and
+// the first bar after the position closes can produce a spurious cross or miss a
+// real one. That is a live signal bug on the chart, not merely a parity issue,
+// and it lands on x_state -- which docs/06 section 2 compares EXACTLY.
+//
+// Hoisted so both run on every bar. Matches
+// azimuth/core/signals.py::_entry_gates, which computes the crossover series
+// across the whole score before applying the gates.
+scoreCrossUp   = ta.crossover(score,   enterTh)
+scoreCrossDown = ta.crossunder(score, -enterTh)
+
+longTrig  = state <= 0 and scoreCrossUp   and cooled and gateOK and htfLongOK
+shortTrig = state >= 0 and scoreCrossDown and cooled and gateOK and htfShortOK
 exitLong  = state ==  1 and score <  exitTh
 exitShort = state == -1 and score > -exitTh
 
@@ -232,8 +277,12 @@ else if exitLong or exitShort
     state := 0, entryPx := na, stopPx := na, tgtPx := na
 
 // ═══════════════════════════ PLOTS ═══════════════════════════
+// NOTE: continuation lines must NOT be indented by a multiple of 4 spaces. Pine
+// reads such a line as a new statement, which leaves the line above ending on a
+// dangling `:` — "end of line without line continuation" (CE10156). 5 spaces is
+// the convention throughout this file.
 scCol = score > enterTh ? color.new(#00c853, 0) : score < -enterTh ? color.new(#d50000, 0) :
-        score > 0 ? color.new(#00c853, 55) : color.new(#d50000, 55)
+     score > 0 ? color.new(#00c853, 55) : color.new(#d50000, 55)
 
 plot(score, "AZIMUTH Score", color = scCol, linewidth = 2)
 plot(ta.ema(score, 5), "Score EMA", color = color.new(color.gray, 40))
